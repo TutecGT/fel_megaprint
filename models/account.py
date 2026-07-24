@@ -21,6 +21,8 @@ class AccountMove(models.Model):
     name_pdf_fel = fields.Char('Nombre archivo PDF FEL', default='fel.pdf', size=32)
     
     def _post(self, soft=True):
+        if self.env.context.get('skip_fel_certification'):
+            return super(AccountMove, self)._post(soft)
         if self.certificar():
             return super(AccountMove, self)._post(soft)
 
@@ -111,54 +113,72 @@ class AccountMove(models.Model):
                     factura.error_certificador(r.text)
 
         return True
-    
-    def button_cancel(self):
-        result = super(AccountMove, self).button_cancel()
-        for factura in self:
-            if factura.requiere_certificacion() and factura.firma_fel:
-                dte = factura.dte_anulacion()
-                logging.warning(dte)
-                xml_sin_firma = etree.tostring(dte, encoding="UTF-8").decode("utf-8")
 
-                request_url = "apiv2"
-                request_path = ""
-                request_url_firma = ""
-                if factura.company_id.pruebas_fel:
-                    request_url = "dev2.api"
-                    request_path = ""
-                    request_url_firma = "dev."
+    def _anular_fel_certificador(self):
+        self.ensure_one()
+        factura = self
 
-                headers = { "Content-Type": "application/xml" }
-                data = '<?xml version="1.0" encoding="UTF-8"?><SolicitaTokenRequest><usuario>{}</usuario><apikey>{}</apikey></SolicitaTokenRequest>'.format(factura.company_id.usuario_fel, factura.company_id.clave_fel)
-                r = requests.post('https://'+request_url+'.ifacere-fel.com/'+request_path+'api/solicitarToken', data=data, headers=headers)
+        if not factura.requiere_certificacion('megaprint'):
+            return super(AccountMove, self)._anular_fel_certificador()
+
+        dte = factura.dte_anulacion()
+        logging.warning(dte)
+        xml_sin_firma = etree.tostring(dte, encoding="UTF-8").decode("utf-8")
+        xmls_base64 = base64.b64encode(xml_sin_firma.encode("utf-8"))
+
+        request_url = "apiv2"
+        request_path = ""
+        request_url_firma = ""
+        if factura.company_id.pruebas_fel:
+            request_url = "dev2.api"
+            request_path = ""
+            request_url_firma = "dev."
+
+        headers = { "Content-Type": "application/xml" }
+        data = '<?xml version="1.0" encoding="UTF-8"?><SolicitaTokenRequest><usuario>{}</usuario><apikey>{}</apikey></SolicitaTokenRequest>'.format(factura.company_id.usuario_fel, factura.company_id.clave_fel)
+        r = requests.post('https://'+request_url+'.ifacere-fel.com/'+request_path+'api/solicitarToken', data=data, headers=headers)
+        resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
+
+        if len(resultadoXML.xpath("//token")) > 0:
+            token = resultadoXML.xpath("//token")[0].text
+            uuid_factura = str(uuid.uuid5(uuid.NAMESPACE_OID, str(factura.id))).upper()
+
+            headers = { "Content-Type": "application/xml", "authorization": "Bearer "+token }
+            data = '<?xml version="1.0" encoding="UTF-8"?><FirmaDocumentoRequest id="{}"><xml_dte><![CDATA[{}]]></xml_dte></FirmaDocumentoRequest>'.format(uuid_factura, xml_sin_firma)
+            r = requests.post('https://'+request_url_firma+'api.soluciones-mega.com/api/solicitaFirma', data=data.encode('utf-8'), headers=headers)
+            logging.warning(r.text)
+            resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
+            if len(resultadoXML.xpath("//xml_dte")) > 0:
+                xml_con_firma = html.unescape(resultadoXML.xpath("//xml_dte")[0].text)
+
+                headers = { "Content-Type": "application/xml", "authorization": "Bearer "+token }
+                data = '<?xml version="1.0" encoding="UTF-8"?><AnulaDocumentoXMLRequest id="{}"><xml_dte><![CDATA[{}]]></xml_dte></AnulaDocumentoXMLRequest>'.format(uuid_factura, xml_con_firma)
+                logging.warning(data)
+                r = requests.post('https://'+request_url+'.ifacere-fel.com/'+request_path+'api/anularDocumentoXML', data=data.encode('utf-8'), headers=headers)
                 resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
 
-                if len(resultadoXML.xpath("//token")) > 0:
-                    token = resultadoXML.xpath("//token")[0].text
-                    uuid_factura = str(uuid.uuid5(uuid.NAMESPACE_OID, str(factura.id))).upper()
-
-                    headers = { "Content-Type": "application/xml", "authorization": "Bearer "+token }
-                    data = '<?xml version="1.0" encoding="UTF-8"?><FirmaDocumentoRequest id="{}"><xml_dte><![CDATA[{}]]></xml_dte></FirmaDocumentoRequest>'.format(uuid_factura, xml_sin_firma)
-                    r = requests.post('https://'+request_url_firma+'api.soluciones-mega.com/api/solicitaFirma', data=data.encode('utf-8'), headers=headers)
-                    logging.warning(r.text)
-                    resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
-                    if len(resultadoXML.xpath("//xml_dte")) > 0:
-                        xml_con_firma = html.unescape(resultadoXML.xpath("//xml_dte")[0].text)
-
-                        headers = { "Content-Type": "application/xml", "authorization": "Bearer "+token }
-                        data = '<?xml version="1.0" encoding="UTF-8"?><AnulaDocumentoXMLRequest id="{}"><xml_dte><![CDATA[{}]]></xml_dte></AnulaDocumentoXMLRequest>'.format(uuid_factura, xml_con_firma)
-                        logging.warning(data)
-                        r = requests.post('https://'+request_url+'.ifacere-fel.com/'+request_path+'api/anularDocumentoXML', data=data.encode('utf-8'), headers=headers)
-                        resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
-
-                        if len(resultadoXML.xpath("//listado_errores")) > 0:
-                            raise UserError(r.text)
-                    else:
-                        raise UserError(r.text)
-                else:
+                if len(resultadoXML.xpath("//listado_errores")) > 0:
                     raise UserError(r.text)
-                    
-        return result
+
+                vals = {
+                    'documento_xml_fel': xmls_base64,
+                    'documento_xml_fel_name': 'documento_anulacion_fel.xml',
+                    'resultado_xml_fel': base64.b64encode(bytes(r.text, encoding='utf-8')),
+                    'resultado_xml_fel_name': 'resultado_anulacion_fel.xml',
+                }
+                if 'pdf_fel' in factura._fields:
+                    vals.update({
+                        'pdf_fel': False,
+                        'name_pdf_fel': 'anulacion_fel.pdf',
+                    })
+                return vals
+            else:
+                raise UserError(r.text)
+        else:
+            raise UserError(r.text)
+
+    def button_cancel(self):
+        return super(AccountMove, self).button_cancel()
 
 class ResCompany(models.Model):
     _inherit = "res.company"
