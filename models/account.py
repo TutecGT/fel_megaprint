@@ -78,6 +78,7 @@ class AccountMove(models.Model):
                             data = '<?xml version="1.0" encoding="UTF-8"?><RegistraDocumentoXMLRequest id="{}"><xml_dte><![CDATA[{}]]></xml_dte></RegistraDocumentoXMLRequest>'.format(uuid_factura, xml_con_firma)
                             logging.warning(data)
                             r = requests.post('https://'+request_url+'.ifacere-fel.com/'+request_path+'api/registrarDocumentoXML', data=data.encode('utf-8'), headers=headers)
+                            logging.warning(r.text)
                             resultadoXML = etree.XML(bytes(r.text, encoding='utf-8'))
 
                             if len(resultadoXML.xpath("//listado_errores")) == 0:
@@ -99,7 +100,9 @@ class AccountMove(models.Model):
                                 if len(resultadoXML.xpath("//listado_errores")) == 0:
                                     pdf = resultadoXML.xpath("//pdf")[0].text
                                     factura.pdf_fel = pdf
-                                    
+                                else:
+                                    factura.error_certificador(r.text)
+
                             else:
                                 factura.error_certificador(r.text)
 
